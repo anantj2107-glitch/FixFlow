@@ -16,6 +16,9 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
+from backend.app.duplicate_detection import Candidate, DuplicateDetector
+from backend.app.issue_recommendation import CATEGORIES, IssueRecommender
+
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -42,6 +45,8 @@ ROLES = {"resident", "technician", "warden", "admin"}
 STAFF_ROLES = {"warden", "admin"}
 password_hasher = PasswordHasher()
 bearer_scheme = HTTPBearer(auto_error=False)
+duplicate_detector = DuplicateDetector()
+issue_recommender = IssueRecommender(duplicate_detector)
 
 DEMO_TICKETS = [
     ("FF-1042", "Plumbing", "A", "204", "Water is leaking continuously below the washroom sink.", "High", "Open", "Unassigned", "Aarav Kumar", "Today, 10:12"),
@@ -115,25 +120,27 @@ def read_ticket(database: sqlite3.Connection, ticket_id: str) -> sqlite3.Row | N
     return database.execute("""SELECT tickets.*, residents.display_name AS resident_name, assignees.display_name AS assignee_name FROM tickets LEFT JOIN users AS residents ON residents.id = tickets.resident_id LEFT JOIN users AS assignees ON assignees.id = tickets.assigned_to_id WHERE tickets.id = ?""", (ticket_id,)).fetchone()
 
 
-def find_duplicate(ticket: dict, ignore_id: str | None = None) -> str | None:
-    with connection() as database:
-        row = database.execute("SELECT id FROM tickets WHERE category = ? AND block = ? AND status != 'Resolved' AND id != ? ORDER BY updated_at DESC LIMIT 1", (ticket["category"], ticket["block"], ignore_id or "")).fetchone()
-    return row["id"] if row else None
-
-
 def ticket_dictionary(row: sqlite3.Row) -> dict:
     ticket = dict(row)
     ticket["resident"] = ticket.pop("resident_name") or ticket["resident"]
     ticket["assignee"] = ticket.pop("assignee_name") or ticket["assignee"]
-    ticket["duplicate_of"] = find_duplicate(ticket, ticket["id"])
     return ticket
 
 
+def duplicate_suggestions(source: Candidate) -> tuple[list[dict], str]:
+    """Search unresolved same-category tickets. Never raises during ticket creation."""
+    try:
+        with connection() as database:
+            rows = database.execute("SELECT id, category, block, room, description, status FROM tickets WHERE status != 'Resolved' AND category = ?", (source.category,)).fetchall()
+        candidates = [Candidate(**dict(row)) for row in rows]
+        return duplicate_detector.suggest(source, candidates, exclude_id=source.id)
+    except Exception:
+        return [], "lexical_fallback"
+
+
 def infer_priority(category: str, description: str) -> str:
-    terms = ("fire", "smoke", "sparking", "electric shock", "gas leak", "stuck", "flood", "security", "danger", "emergency")
-    if category == "Security" or any(term in description.lower() for term in terms):
-        return "High"
-    return "Medium" if category in {"Electricity", "Lift", "Plumbing", "Internet"} else "Low"
+    """Keep ticket priority deterministic; model similarity never overrides safety."""
+    return issue_recommender.recommend_priority(description, category)["recommended_priority"]
 
 
 def next_ticket_id(database: sqlite3.Connection) -> str:
@@ -170,10 +177,16 @@ class TokenResponse(BaseModel):
 
 class TicketCreate(BaseModel):
     model_config = ConfigDict(extra="ignore", str_strip_whitespace=True)
-    category: str = Field(min_length=2, max_length=50)
+    category: Literal["Plumbing", "Electricity", "Lift", "Cleaning", "Security", "Internet", "Furniture", "Other"]
     block: str = Field(min_length=1, max_length=30)
     room: str = Field(min_length=1, max_length=80)
     description: str = Field(min_length=8, max_length=1200)
+
+
+class TicketRecommendationRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore", str_strip_whitespace=True)
+    description: str = Field(min_length=8, max_length=1200)
+    category: str | None = Field(default=None, max_length=50)
 
 
 class TicketUpdate(BaseModel):
@@ -282,14 +295,32 @@ def list_tickets(user: Annotated[dict, Depends(current_user)], status_filter: st
     return [ticket_dictionary(row) for row in rows]
 
 
+@app.post("/api/v1/tickets/recommendation")
+def ticket_recommendation(payload: TicketRecommendationRequest, _: Annotated[dict, Depends(require_roles("resident"))]) -> dict:
+    if payload.category and payload.category not in CATEGORIES:
+        raise HTTPException(status_code=422, detail="Unknown category")
+    return issue_recommender.recommend(payload.description, payload.category)
+
+
 @app.post("/api/v1/tickets", status_code=status.HTTP_201_CREATED)
 def create_ticket(payload: TicketCreate, user: Annotated[dict, Depends(require_roles("resident"))]) -> dict:
+    recommendations = issue_recommender.recommend(payload.description, payload.category)
     with connection() as database:
         ticket_id = next_ticket_id(database)
+    source = Candidate(ticket_id, payload.category, payload.block, payload.room, payload.description, "Open")
+    suggestions, detection_method = duplicate_suggestions(source)
+    with connection() as database:
         now = utc_now()
-        database.execute("INSERT INTO tickets (id, category, block, room, description, priority, status, assignee, resident, resident_id, assigned_to_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 'Open', 'Unassigned', ?, ?, NULL, 'Just now', ?)", (ticket_id, payload.category, payload.block, payload.room, payload.description, infer_priority(payload.category, payload.description), user["display_name"], user["id"], now))
+        database.execute("INSERT INTO tickets (id, category, block, room, description, priority, status, assignee, resident, resident_id, assigned_to_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 'Open', 'Unassigned', ?, ?, NULL, 'Just now', ?)", (ticket_id, payload.category, payload.block, payload.room, payload.description, recommendations["priority"]["recommended_priority"], user["display_name"], user["id"], now))
         row = read_ticket(database, ticket_id)
-    return ticket_dictionary(row)
+    ticket = ticket_dictionary(row)
+    # Suggestion payload deliberately excludes other residents' text, names, rooms,
+    # and all other private ticket fields.
+    ticket["duplicate_suggestions"] = suggestions
+    ticket["duplicate_detection_method"] = detection_method
+    ticket["classification_recommendation"] = recommendations["category"]
+    ticket["priority_recommendation"] = recommendations["priority"]
+    return ticket
 
 
 @app.patch("/api/v1/tickets/{ticket_id}")

@@ -57,6 +57,7 @@ input:focus, select:focus, textarea:focus { border-color: #3b876e; outline: 3px 
 .intelligence-card { padding: 22px; border-radius: 13px; background: #f0f7f3; }
 .intelligence-card h3 { margin: 0 0 7px; font-size: 16px; }
 .intelligence-card p { margin: 0 0 17px; color: #53645f; font-size: 14px; line-height: 1.5; }
+.intelligence-divider { margin: 20px 0; border: 0; border-top: 1px solid #cde0d5; }.recommendation-result { display: grid; gap: 6px; }.recommendation-result p { margin: 0; }.recommendation-result .button { justify-self: start; margin: 3px 0 6px; }.recommendation-note { color: #60706c !important; font-size: 12px !important; }
 .rule-list { display: grid; gap: 11px; margin: 0; padding: 0; list-style: none; }
 .rule-list li { display: flex; gap: 9px; align-items: flex-start; color: #355148; font-size: 13px; line-height: 1.35; }
 .rule-list strong { color: var(--green); }
@@ -81,6 +82,8 @@ input:focus, select:focus, textarea:focus { border-color: #3b876e; outline: 3px 
 .pill { display: inline-flex; align-items: center; border-radius: 99px; padding: 4px 8px; font-size: 11px; font-weight: 800; }
 .pill.high { color: #8b261f; background: #f8dfdc; }.pill.medium { color: #995713; background: #fae9cb; }.pill.low { color: #216146; background: #ddf3e6; }.pill.open { color: #295c9a; background: #e0ecfa; }.pill.progress { color: #6b529c; background: #eee8fa; }.pill.resolved { color: #216146; background: #ddf3e6; }
 .duplicate-note { color: #8d4b14; font-size: 12px; font-weight: 700; }
+.suggestion-panel { margin: 0 0 18px; padding: 15px 16px; border: 1px solid #b9d9c8; border-radius: 12px; background: #f0f8f3; }
+.suggestion-panel h3 { margin: 0 0 5px; font-size: 15px; }.suggestion-panel p, .suggestion-panel ul { margin: 0; color: #476158; font-size: 13px; line-height: 1.45; }.suggestion-panel ul { margin-top: 9px; padding-left: 19px; }.suggestion-panel li + li { margin-top: 4px; }
 .empty { padding: 34px; border: 1px dashed #b9c8c2; border-radius: 12px; color: var(--muted); text-align: center; }
 .two-col { display: grid; grid-template-columns: 1.35fr .65fr; gap: 20px; }
 .metric-list { display: grid; gap: 15px; }.metric-row { display: grid; grid-template-columns: 1fr auto; gap: 9px; font-size: 13px; }.progress { grid-column: 1 / -1; height: 7px; overflow: hidden; border-radius: 4px; background: #e5ece9; }.progress > span { display: block; height: 100%; border-radius: inherit; background: #4fa779; }

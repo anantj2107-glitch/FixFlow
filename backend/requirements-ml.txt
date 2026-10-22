@@ -1,0 +1,2 @@
+# Optional. Install only when local machine can support model download/runtime.
+sentence-transformers>=3.0,<4.0

@@ -7,6 +7,10 @@
   let tickets = [];
   let health = { open: 0, in_progress: 0, resolved: 0, high_priority: 0, unassigned: 0, active: 0 };
   let technicians = [];
+  let duplicateSuggestions = [];
+  let duplicateMethod = null;
+  let reportRecommendation = null;
+  let recommendationTimer = null;
 
   const esc = value => String(value || "").replace(/[&<>'\"]/g, char => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", "'":"&#039;", "\"":"&quot;" }[char]));
   const isStaff = () => ["warden", "admin"].includes(session?.user?.role);
@@ -18,7 +22,7 @@
 
   function readSession() { try { return JSON.parse(sessionStorage.getItem(sessionKey)); } catch { return null; } }
   function saveSession(value) { session = value; sessionStorage.setItem(sessionKey, JSON.stringify(value)); }
-  function logout(message = "Signed out.") { session = null; tickets = []; technicians = []; sessionStorage.removeItem(sessionKey); location.hash = ""; renderAuth(); if (message) toast(message); }
+  function logout(message = "Signed out.") { session = null; tickets = []; technicians = []; duplicateSuggestions = []; duplicateMethod = null; reportRecommendation = null; sessionStorage.removeItem(sessionKey); location.hash = ""; renderAuth(); if (message) toast(message); }
   async function api(path, options = {}) {
     const headers = { "Content-Type": "application/json", ...(options.headers || {}) };
     if (session?.access_token) headers.Authorization = `Bearer ${session.access_token}`;
@@ -48,7 +52,7 @@
     nav.querySelectorAll("[data-route]").forEach(link => link.classList.toggle("active", link.dataset.route === page()));
   }
   function ticketCard(ticket, action = "") {
-    return `<article class="ticket-card"><div class="ticket-top"><div><p class="ticket-id">${esc(ticket.id)} · ${esc(ticket.created_at)}</p><h3 class="ticket-title">${esc(ticket.category)} issue · Block ${esc(ticket.block)}, ${esc(ticket.room)}</h3></div><div class="pills"><span class="pill ${ticket.priority.toLowerCase()}">${esc(ticket.priority)}</span><span class="pill ${statusClass(ticket.status)}">${esc(ticket.status)}</span></div></div><p class="ticket-desc">${esc(ticket.description)}</p><div class="ticket-footer"><span class="ticket-meta">Assigned: ${esc(ticket.assignee)}</span>${ticket.duplicate_of ? `<span class="duplicate-note">Possible duplicate: ${esc(ticket.duplicate_of)}</span>` : ""}${action}</div></article>`;
+    return `<article class="ticket-card"><div class="ticket-top"><div><p class="ticket-id">${esc(ticket.id)} · ${esc(ticket.created_at)}</p><h3 class="ticket-title">${esc(ticket.category)} issue · Block ${esc(ticket.block)}, ${esc(ticket.room)}</h3></div><div class="pills"><span class="pill ${ticket.priority.toLowerCase()}">${esc(ticket.priority)}</span><span class="pill ${statusClass(ticket.status)}">${esc(ticket.status)}</span></div></div><p class="ticket-desc">${esc(ticket.description)}</p><div class="ticket-footer"><span class="ticket-meta">Assigned: ${esc(ticket.assignee)}</span>${action}</div></article>`;
   }
   function authView() {
     return `<section class="auth-shell"><section class="hero-copy"><p class="eyebrow">FixFlow secure workspace</p><h1>Maintenance work, safely routed.</h1><p class="lede">Residents report and track own issues. Hostel teams receive access through locally created staff accounts.</p><p class="auth-note">Public registration creates resident accounts only.</p></section><section class="panel auth-panel"><div class="auth-tabs"><button type="button" class="button secondary active-auth" data-auth-view="login">Sign in</button><button type="button" class="button secondary" data-auth-view="register">Register</button></div><div id="auth-form-slot"></div></section></section>`;
@@ -67,14 +71,34 @@
     button.disabled = true; button.textContent = "Please wait…";
     try {
       const response = await api(`/auth/${view === "register" ? "register" : "login"}`, { method: "POST", body: JSON.stringify(Object.fromEntries(new FormData(form))) });
-      saveSession(response); await load(); location.hash = defaultPage(); render(); toast(`Signed in as ${response.user.display_name}.`);
+      duplicateSuggestions = []; duplicateMethod = null; reportRecommendation = null; saveSession(response); await load(); location.hash = defaultPage(); render(); toast(`Signed in as ${response.user.display_name}.`);
     } catch (error) { toast(error.message); button.disabled = false; button.textContent = view === "register" ? "Create resident account" : "Sign in"; }
   }
+  function recommendationMarkup() {
+    if (!reportRecommendation) return `<p class="panel-subtitle">Type a description to see optional category and urgency guidance.</p>`;
+    const category = reportRecommendation.category;
+    const priority = reportRecommendation.priority;
+    const apply = category.differs_from_selected ? `<button type="button" class="button small secondary" data-apply-recommendation="${esc(category.recommended_category)}">Use ${esc(category.recommended_category)}</button>` : "";
+    return `<div class="recommendation-result"><p><strong>Category: ${esc(category.recommended_category)}</strong> · ${Math.round(category.confidence * 100)}% signal</p><p>${esc(category.reason)}</p>${apply}<p><strong>Urgency: ${esc(priority.recommended_priority)}</strong> · ${esc(priority.method === "safety_rule" ? "safety rule" : "context rule")}</p><p>${esc(priority.reason)}</p><p class="recommendation-note">Guidance only. You choose the category; staff can reprioritize.</p></div>`;
+  }
+  function renderRecommendation() { const slot = document.querySelector("#recommendation-slot"); if (slot) slot.innerHTML = recommendationMarkup(); }
+  async function requestRecommendation(form) {
+    const description = form.elements.description.value.trim();
+    if (description.length < 8) { reportRecommendation = null; renderRecommendation(); return; }
+    const category = form.elements.category.value || null;
+    try {
+      const response = await api("/tickets/recommendation", { method: "POST", body: JSON.stringify({ description, category }) });
+      if (form.elements.description.value.trim() === description) { reportRecommendation = response; renderRecommendation(); }
+    } catch (_) { reportRecommendation = null; renderRecommendation(); }
+  }
+  function scheduleRecommendation(form) { clearTimeout(recommendationTimer); recommendationTimer = setTimeout(() => requestRecommendation(form), 350); }
   function reportView() {
-    return `<section class="hero"><div class="hero-copy"><p class="eyebrow">Resident portal</p><h1>Get issue to right person, faster.</h1><p class="lede">Signed in as ${esc(session.user.display_name)}. FixFlow stores report, assigns ownership from account, keeps request private.</p></div><aside class="hero-card"><h2>What happens next</h2><div class="flow-step"><span class="flow-number">1</span><span><strong>Report</strong><br>Tell us what needs fixing.</span></div><div class="flow-step"><span class="flow-number">2</span><span><strong>Triage</strong><br>Staff receives queue.</span></div><div class="flow-step"><span class="flow-number">3</span><span><strong>Resolve</strong><br>Track work until done.</span></div></aside></section><section class="panel request-layout"><div><div class="panel-head"><div><h2>Report issue</h2><p class="panel-subtitle">Request belongs to your signed-in account.</p></div></div><form id="report-form" class="form-stack"><div class="field-grid"><label>Issue category<select name="category" required><option value="">Choose category</option>${window.FixFlowCategories.map(category => `<option>${category}</option>`).join("")}</select></label><label>Hostel block<select name="block" required><option value="">Select block</option><option>A</option><option>B</option><option>C</option><option>D</option></select></label><label>Room / location<input name="room" required></label></div><label>Describe issue<textarea name="description" required minlength="8" placeholder="Example: Paani leak ho raha hai below washroom sink since morning."></textarea></label><button class="button" type="submit">Submit maintenance request</button></form></div><aside class="intelligence-card"><h3>Secure Phase 2</h3><p>Backend ignores resident identity from browser. JWT account decides ticket owner and permissions.</p><ul class="rule-list"><li><span class="check">✓</span><span>Resident sees only own requests.</span></li><li><span class="check">✓</span><span>Staff assignment backend-enforced.</span></li><li><span class="check">✓</span><span>Expired tokens sign out safely.</span></li></ul></aside></section>`;
+    reportRecommendation = null;
+    return `<section class="hero"><div class="hero-copy"><p class="eyebrow">Resident portal</p><h1>Get issue to right person, faster.</h1><p class="lede">Signed in as ${esc(session.user.display_name)}. FixFlow stores report, assigns ownership from account, keeps request private.</p></div><aside class="hero-card"><h2>What happens next</h2><div class="flow-step"><span class="flow-number">1</span><span><strong>Report</strong><br>Tell us what needs fixing.</span></div><div class="flow-step"><span class="flow-number">2</span><span><strong>Triage</strong><br>Staff receives queue.</span></div><div class="flow-step"><span class="flow-number">3</span><span><strong>Resolve</strong><br>Track work until done.</span></div></aside></section><section class="panel request-layout"><div><div class="panel-head"><div><h2>Report issue</h2><p class="panel-subtitle">Request belongs to your signed-in account.</p></div></div><form id="report-form" class="form-stack"><div class="field-grid"><label>Issue category<select name="category" required><option value="">Choose category</option>${window.FixFlowCategories.map(category => `<option>${category}</option>`).join("")}</select></label><label>Hostel block<select name="block" required><option value="">Select block</option><option>A</option><option>B</option><option>C</option><option>D</option></select></label><label>Room / location<input name="room" required></label></div><label>Describe issue<textarea name="description" required minlength="8" placeholder="Example: Paani leak ho raha hai below washroom sink since morning."></textarea></label><button class="button" type="submit">Submit maintenance request</button></form></div><aside class="intelligence-card"><h3>Ticket guidance</h3><div id="recommendation-slot">${recommendationMarkup()}</div><hr class="intelligence-divider"><h3>Secure Phase 2</h3><p>Backend ignores resident identity from browser. JWT account decides ticket owner and permissions.</p><ul class="rule-list"><li><span class="check">✓</span><span>Resident sees only own requests.</span></li><li><span class="check">✓</span><span>Staff assignment backend-enforced.</span></li><li><span class="check">✓</span><span>Expired tokens sign out safely.</span></li></ul></aside></section>`;
   }
   function residentView() {
-    return `<section class="panel"><div class="panel-head"><div><p class="eyebrow">Resident portal</p><h2>My maintenance requests</h2><p class="panel-subtitle">Only requests owned by ${esc(session.user.display_name)}.</p></div><a class="button" href="#report">New request</a></div><div class="ticket-grid">${tickets.length ? tickets.map(ticket => ticketCard(ticket)).join("") : `<div class="empty">No requests yet. Report issue to begin.</div>`}</div></section>`;
+    const suggestions = duplicateSuggestions.length ? `<section class="suggestion-panel"><h3>Possible related requests</h3><p>Suggestions only. Your request was submitted and was not merged or rejected. Matching used ${duplicateMethod === "embedding" ? "a multilingual semantic model" : "lexical fallback"}.</p><ul>${duplicateSuggestions.map(item => `<li><strong>${esc(item.ticket_id)}</strong> · ${Math.round(item.similarity * 100)}% · ${esc(item.reason)}</li>`).join("")}</ul></section>` : "";
+    return `<section class="panel"><div class="panel-head"><div><p class="eyebrow">Resident portal</p><h2>My maintenance requests</h2><p class="panel-subtitle">Only requests owned by ${esc(session.user.display_name)}.</p></div><a class="button" href="#report">New request</a></div>${suggestions}<div class="ticket-grid">${tickets.length ? tickets.map(ticket => ticketCard(ticket)).join("") : `<div class="empty">No requests yet. Report issue to begin.</div>`}</div></section>`;
   }
   function staffTicketAction(ticket) {
     const options = technicians.map(person => `<option value="${person.id}" ${ticket.assigned_to_id === person.id ? "selected" : ""}>${esc(person.display_name)}</option>`).join("");
@@ -103,7 +127,12 @@
   async function updateTicket(ticket, change) { await api(`/tickets/${ticket.id}`, { method: "PATCH", body: JSON.stringify(change) }); await load(); render(); }
   function bind() {
     const form = document.querySelector("#report-form");
-    if (form) form.addEventListener("submit", async event => { event.preventDefault(); const button = form.querySelector("button"); button.disabled = true; button.textContent = "Submitting…"; try { const ticket = await api("/tickets", { method: "POST", body: JSON.stringify(Object.fromEntries(new FormData(form))) }); await load(); location.hash = "resident"; render(); toast(ticket.duplicate_of ? `Request ${ticket.id} submitted; duplicate ${ticket.duplicate_of} flagged.` : `Request ${ticket.id} submitted.`); } catch (error) { toast(error.message); button.disabled = false; button.textContent = "Submit maintenance request"; } });
+    if (form) {
+      form.elements.description.addEventListener("input", () => scheduleRecommendation(form));
+      form.elements.category.addEventListener("change", () => scheduleRecommendation(form));
+      form.addEventListener("click", event => { const button = event.target.closest("[data-apply-recommendation]"); if (!button) return; form.elements.category.value = button.dataset.applyRecommendation; scheduleRecommendation(form); });
+      form.addEventListener("submit", async event => { event.preventDefault(); const button = form.querySelector("button[type='submit']"); button.disabled = true; button.textContent = "Submitting…"; try { const ticket = await api("/tickets", { method: "POST", body: JSON.stringify(Object.fromEntries(new FormData(form))) }); duplicateSuggestions = Array.isArray(ticket.duplicate_suggestions) ? ticket.duplicate_suggestions : []; duplicateMethod = ticket.duplicate_detection_method || null; reportRecommendation = { category: ticket.classification_recommendation, priority: ticket.priority_recommendation }; await load(); location.hash = "resident"; render(); toast(duplicateSuggestions.length ? `Request ${ticket.id} submitted; ${duplicateSuggestions.length} possible related request(s) found.` : `Request ${ticket.id} submitted.`); } catch (error) { toast(error.message); button.disabled = false; button.textContent = "Submit maintenance request"; } });
+    }
     document.querySelectorAll("[data-action]").forEach(button => button.addEventListener("click", async () => { const ticket = tickets.find(item => item.id === button.dataset.id); if (!ticket) return; try { if (button.dataset.action === "assign") { const chosen = document.querySelector(`[data-assignee="${ticket.id}"]`)?.value; if (!chosen) throw new Error("Choose technician first."); await updateTicket(ticket, { assignee_id: Number(chosen), status: "In progress" }); toast(`${ticket.id} assigned.`); } else if (button.dataset.action === "reopen") { await updateTicket(ticket, { status: "Open" }); toast(`${ticket.id} reopened.`); } else { await updateTicket(ticket, { status: "Resolved" }); toast(`${ticket.id} marked resolved.`); } } catch (error) { toast(error.message); } }));
   }
   async function start() {
